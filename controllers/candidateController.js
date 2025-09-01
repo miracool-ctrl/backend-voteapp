@@ -111,36 +111,65 @@ const getCandidatesByElection = async (req, res, next) => {
 // ==================================== DELETE CANDIDATE
 // DELETE : api/candidates/:id
 // Protected (only admin)
+// ==================================== DELETE CANDIDATE
+// DELETE : api/candidates/:id
+// Protected (only admin)
 const removeCandidate = async (req, res, next) => {
+  let sess;
   try {
     if (!req.user.isAdmin) {
       return next(new HttpError("You are not authorized to remove a candidate", 403));
     }
 
     const { id } = req.params;
-    let currentCandidate = await CandidateModel.findById(id).populate("election");
-
+    console.log("Attempting to delete candidate with ID:", id);
+    
+    // Find the candidate and populate the election
+    const currentCandidate = await CandidateModel.findById(id).populate("election");
+    
     if (!currentCandidate) {
+      console.log("Candidate not found");
       return next(new HttpError("Candidate not found", 404));
     }
 
-    const sess = await mongoose.startSession();
+    console.log("Found candidate:", currentCandidate.fullName);
+    console.log("Associated election:", currentCandidate.election._id);
+
+    // Start session and transaction
+    sess = await mongoose.startSession();
     sess.startTransaction();
 
-    await currentCandidate.deleteOne({ session: sess });
-    currentCandidate.election.candidates.pull(currentCandidate);
+    // Remove candidate from the election's candidates array first
+    currentCandidate.election.candidates.pull(id);
     await currentCandidate.election.save({ session: sess });
 
-    await sess.commitTransaction();
+    // Then delete the candidate
+    await CandidateModel.findByIdAndDelete(id, { session: sess });
 
+    // Commit the transaction
+    await sess.commitTransaction();
+    console.log("Candidate deleted successfully");
+    
     return res.status(200).json({ message: "Candidate removed successfully" });
 
   } catch (error) {
+    // Abort transaction if it was started
+    if (sess && sess.inTransaction()) {
+      await sess.abortTransaction();
+    }
+    console.error("Error in removeCandidate:", error);
     return next(new HttpError(error.message || "Failed to remove candidate", 500));
+  } finally {
+    // End session if it was created
+    if (sess) {
+      await sess.endSession();
+    }
   }
 };
 
-
+// ==================================== VOTE FOR CANDIDATE
+// POST : api/candidates/:id/vote
+// Protected
 // ==================================== VOTE FOR CANDIDATE
 // POST : api/candidates/:id/vote
 // Protected
@@ -148,6 +177,13 @@ const voteCandidate = async (req, res, next) => {
   try {
     const { id: candidateId } = req.params;
     const { currentVoterId, selectedElection } = req.body;
+
+    console.log('VOTE REQUEST:', {
+      candidateId,
+      currentVoterId,
+      selectedElection,
+      body: req.body
+    });
 
     // 1. Candidate check
     const candidate = await CandidateModel.findById(candidateId);
@@ -179,17 +215,22 @@ const voteCandidate = async (req, res, next) => {
     sess.startTransaction();
 
     await candidate.save({ session: sess });
-    election.voters.push(voter._id);
+    
+    // FIXED: Only update voter's votedElections, not election.voters
     voter.votedElections.push(election._id);
-
-    await election.save({ session: sess });
     await voter.save({ session: sess });
 
     await sess.commitTransaction();
 
+    console.log('VOTE SUCCESSFUL:', {
+      candidateVotes: candidate.voteCount,
+      voterElections: voter.votedElections
+    });
+
     return res.status(200).json(voter.votedElections);
 
   } catch (error) {
+    console.error('VOTE ERROR:', error);
     return next(new HttpError(error.message || "Voting failed", 500));
   }
 };
